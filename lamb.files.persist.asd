@@ -10,10 +10,13 @@
                :depot
                :cl-binary-store
                :ironclad
+               :crypto-shortcuts
                :filesystem-utils
                :pathname-utils
                :file-attributes
                )
   :serial t
   :components ((:file "package")
-               (:file "payload")))
+               (:static-file "README.org")
+               (:module "src"
+                 :components((:file "persist")))))
