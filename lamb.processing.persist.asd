@@ -1,4 +1,4 @@
-(defsystem "lamb.files.persist"
+(defsystem "lamb.processing.persist"
   :description "on disk persistent memoization for expensive computations"
   :author "common-lamb (https://github.com/common-lamb)"
   :version "0.0.1"
