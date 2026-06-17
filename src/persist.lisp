@@ -1,30 +1,77 @@
+
+;; ==== persist
+
 (in-package :persist)
 
 (declaim (optimize sb-c:store-source-form)) ;; necessary before compilation happens
 
-;; ==== parameters
+;; ==== global parameters
 
-(defparameter *program-name* "un-named"
-  "prefixed to files in cache dir <program>.function.Ha5H.bin")
-;; &&& make a warning if unset
+(defvar *unset-program-name* "unset-program-name"
+  "program-name when not explicitly set by user. universal to all instances of persist")
 
-(defparameter *cache-dir*
-  (if (uiop:getenv "TMPDIR")
-      (merge-pathnames "persist/"
-        (uiop:getenv "TMPDIR"))
-      (merge-pathnames "persist/"
-        #P"/tmp/")))
+(defparameter *program-name* *unset-program-name*
+  "prefixed to files in cache dir <program-name>_function_Ha5H.bin")
 
-(defparameter *config* '(:testing t))
-;; ==== beam notes
-;; beam should be a separate menu
-;; evaluate symbol
-;; beam function
-;; highlight opposite paren forward
-;; jump cursor by forms
-;; live pinned evaluation
-;; file and repl side by side not up down
-;; vim!
+;; ==== configuration
+
+(defparameter *config* '() "active configuration")
+
+(defparameter *config-common*
+  `(
+    ;;:application-root ,(asdf:component-pathname (asdf:find-system :persist))
+    :cache-directory ,(if (uiop:getenv "TMPDIR")
+                         (merge-pathnames "persist/"
+                                          (uiop:getenv "TMPDIR"))
+                         (merge-pathnames "persist/"
+                                          #P"/tmp/"))
+    :force-recalculation nil ;; when t do not return cache hits
+    :eviction-active t ;; t or nil to activate eviction
+    :max-cache-size-tb 0.25 ;; specify the cache size in Tb scale
+    :evict-other-programs nil ;;  DANGER: if t eviction operates on all cache contents
+    :log-level :info
+    :debug nil ;; true or nil
+    :depot-backend :file-system ;; &&& to be used for sqlite and ipfs when implemented
+    ))
+
+(defparameter *config-dev*
+  '(
+    :debug t
+    :log-level :debug
+    :force-recalculation t
+    :max-cache-size-tb 0.0001
+    ))
+
+(defparameter *config-prod*
+  '(
+    :max-cache-size-tb 0.25
+    ))
+
+(defparameter *config-force-refresh*
+  '(
+    :force-recalculation t
+    :eviction-active t
+    :evict-other-programs t
+    ))
+
+(defun config-merge (config-super config-sub)
+  "merges plists
+config-super keywords will be found before any keywords also found in config-sub"
+  `(,@config-super ,@config-sub))
+
+(defun config (&key kw (config *config*))
+  "fetches current configuration or a specific value"
+  (assert (not (null config)) (config) "config must be set")
+  (if kw
+      (progn
+        (assert (not (null (find kw config))) (kw)
+                "keyword not found in config ~%~S not an element of ~%~S" kw config)
+        (getf config kw))
+      config))
+
+;; &&& with config macro
+;; (let ((*config* *config-dev*))
+;;   (cache-file-pathname 'add1 '(1)))
 
 ;; ==== argument literal hashes
 (defun hash-arg (arg)
@@ -33,12 +80,12 @@
 (defun hash-2-args (arg1 arg2)
   (cryptos:md5 (format nil "~S~S" (hash-arg arg1) (hash-arg arg2))))
 
-(defun hash-args (&rest args)
+(defun hash-args (args)
   "takes an arbitrary list of args
   reduce to a hash of hashes"
   (case (length args)
     (0 (cryptos:md5 ""))
-    (1 (hash-arg (first args))) ;; &&& is this running the list or just the literal?
+    (1 (hash-arg (first args)))
     (otherwise (reduce #'hash-2-args args))))
 
 ;; ==== file content hashes
@@ -49,7 +96,7 @@
 (defun hash-2-files (file1 file2)
   (cryptos:md5 (format nil "~S~S" (hash-file file1) (hash-file file2))))
 
-(defun hash-files (&rest args)
+(defun hash-files (args)
   "takes an arbitrary list of args
    filters for files that exist
    hashes the contents of the files"
@@ -60,6 +107,26 @@
       (otherwise (reduce #'hash-2-files files)))))
 
 ;; ==== function hashes
+
+(defun ensure-function-object (fun &key (sym-in-only t) (fun-out-only t))
+  "converts symbol to function. with optional enforcement of inputs and outputs"
+  (let ((function-object (cond
+                           ((functionp fun) fun)
+                           ((fboundp fun) (symbol-function fun))
+                           ;; nil if no way to find function
+                           )))
+    ;; ensure fun passed as symbol 'fun
+    ;;(because #'fun will resolve the function at a point in time,
+    ;; we want the symbol to dynamically respond to definition changes)
+    (when (and sym-in-only
+               (not (symbolp fun)))
+      (error "~&fun must be passed as a symbol: ~S" fun))
+    ;; enforce functions only
+    ;; &&& add an error if fun-object is a macro
+    (when (and fun-out-only
+               (not (functionp function-object)))
+      (error "~&fun must be function bound: ~S" fun))
+    function-object))
 
 (defun hash-function (fun)
   "
@@ -94,22 +161,12 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
 
   (let* (
          ;; attempt to coerce fun to function object
-         (function-object (cond
-                            ((functionp fun) fun)
-                            ((fboundp fun) (symbol-function fun))
-                            ;; &&& factor out
-                            ;; nil if no way to find function
-                            ))
-
+         (function-object (ensure-function-object fun))
          (lambda-form (when function-object
-                        (function-lambda-expression function-object)
-                        ;; nil if no function-object
-                        ))
+                        (function-lambda-expression function-object)))
          (normalized-string-form (with-standard-io-syntax
                                    (let ((*print-circle* t))
                                      (write-to-string lambda-form))))
-         ;; "NIL" if no function-object
-
          ;; in case of macros and symbols
          (description (with-output-to-string (s)
                         (let ((*standard-output* s))
@@ -118,7 +175,7 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
     (cryptos:md5 (concatenate 'string normalized-string-form description))))
 
 ;; ==== form hash
-(defun hash-form (fun &rest args)
+(defun hash-form (fun &optional args)
   (cryptos:md5 (format nil "~S~S~S"
                        (hash-function fun)
                        (hash-args args)
@@ -128,45 +185,42 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
 
 (defun add1 (a) (+ a 1))
 
-;; ;; when evaluated
+;; when evaluated
 ;; (hash-function #'add1)
-;; ;; => "479f583d1cf670e8f4ab63bfd3499c37"
-;; (hash-function 'add1)
-;; ;; => "f09ae336824a4b1bc3ac6da69cfd74aa"
+;; => error
 ;; (hash-form #'add1)
-;; ;; => "b028cc4b0bfae8845b0cd4669fab1fe1"
+;; => error
+;; (hash-function 'add1)
+;; => "f09ae336824a4b1bc3ac6da69cfd74aa"
 ;; (hash-form 'add1)
-;; ;; => "2167fdde66c2adfc5fb273de3136458f"
-;; (persist (add1 1))
-;; lookup:
-;;  #P"/tmp/persist/un-named_ADD1_a519740586db1cc6ef860e2847ed2ed4.bin"
+;; => "9f82192449e53a77f8f21ccda5de4981"
+;; (hash-form 'add1 '(1))
+;; => "06897111455f9802e01dcc2a2bad51ee"
 
-;; ;; when compiled
-;; (hash-function #'add1)
-;; ;; => "662081b04f977cb00ed29c82b114b2ef"
-;; (hash-function 'add1)
-;; ;; => "41bfa566537988f2a02159f41ddb2ec6"
-;; (hash-form #'add1)
-;; ;; => "0b5454bbbe37e83a2016a6d56c1b8f5e"
-;; (hash-form 'add1)
-;; ;; => "8e64773b396813818378b2f01e45c433"
 ;; (persist (add1 1))
-;; lookup:
-;;  #P"/tmp/persist/un-named_ADD1_9c99f59f47867e44f1433c45d03cfd99.bin"
+;; => lookup:
+;;  #P"/tmp/persist/unset-program-name_ADD1_06897111455f9802e01dcc2a2bad51ee.bin"
+
+;; when compiled
+;; (hash-function #'add1)
+;; => error
+;; (hash-form #'add1)
+;; => error
+;; (hash-function 'add1)
+;; => "e56fd69091d2266f39e9cf128616ade9"
+;; (hash-form 'add1)
+;; => "1d099fd3d1731b10f5151c6855eb5759"
+;; (hash-form 'add1 '(1))
+;; => "03d40f64c5f5b4ed458876c6322e76d8"
+;; (persist (add1 1))
+;; => lookup:
+;;  #P"/tmp/persist/unset-program-name_ADD1_03d40f64c5f5b4ed458876c6322e76d8.bin"
 
 ;; ==== file name generation
 
 (defun function-name (fun)
   (let* (
-         (function-object (cond
-                            ((functionp fun) fun)
-                            ((fboundp fun) (symbol-function fun))
-                            ;; nil if no way to find function
-                            ;;
-                            ;; &&&  ensure 'fun passed as symbol (because #' is static?)
-                            ;; &&& factor this to ensure-function-object
-                            ;; &&& enforce functions only
-                            ))
+         (function-object (ensure-function-object fun))
          (function-string (write-to-string function-object))
          (drop-curlys (str:replace-all "{.*}" "" function-string :regex t))
          (just-name
@@ -179,12 +233,14 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
                     ))
     sanitized))
 
-(defun cache-file-pathname (cache-dir program-name fun &rest args)
+(defun cache-file-pathname (fun args &key (program-name *program-name*))
   "creates a pathname for the binary memoization"
-  (let ((hash (hash-form fun args))
+  ;; &&& warn if program name not set
+  (let ((cache-dir (config :kw :cache-directory))
+        (hash (hash-form fun args))
         (function-name (function-name fun)))
     (make-pathname :directory (pathname-directory cache-dir)
-                   ;; program-name_fun-name_HA4h.bin
+                   ;; program-name.fun-name.HA4h.bin
                    :name (format nil "~A_~A_~A" program-name function-name hash)
                    :type "bin")))
 
@@ -192,16 +248,19 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
 (defun lookup (cache-file-name &key (config *config*))
   "cache-file-name: pathname in cache"
   (format t "~&lookup:~& ~S" cache-file-name)
-  ;; using config, return nil to force recalculation &&&
-  ;; use depot to search for filepath &&&
-  ;; return hit &&&
-  (format nil "cache-file")
-  nil)
+  ;; &&&  :force-overwrite true, no action, nil will force calculation
+  (unless (config :kw :force-recalculation)
+    ;; use depot to search for filepath &&&
+    ;; return hit &&&
+    )
+  ;; &&& can now use config to force recalculation
+  )
 
 ;; ==== reuse
 (defun reuse (hit &key (config *config*))
-  "hit: whatever the pathname becomes when found in depot&&&"
+  "hit: whatever the pathname becomes when found in depot"
   (format t "~&reuse:~& ~S" hit)
+  ;; &&& what does depot return
   ;; &&& annotate reuse in depot attributes
   ;; &&& unpack binary to annotated result
   ;; (let ((result-form (getf annotated-result :result-form))))
@@ -246,14 +305,19 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
   "Form memoization"
   (let ((fun (car form))
         (args (cdr form)))
-    `(let ((cache-file-name (cache-file-pathname *cache-dir* *program-name* ',fun ,@args)))
+    `(let ((cache-file-name (cache-file-pathname ',fun ',args)))
        (if-let ((hit (lookup cache-file-name)))
          (reuse hit)
          (let ((annotated-result (calculate ',fun ',args)))
            (record cache-file-name annotated-result)
            (yield annotated-result))))))
 
-;; (persist (+ 1 2 3))
+(persist (+ 1 2 3))
+
+;; &&& logging at info
+;; &&& logging at debug
+;; &&& tests
+
 
 ;; ==== &&& use depot to control the cache
 ;; ==== &&& use cl-binary-store to pack and unpack cache contents
@@ -261,11 +325,11 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
 ;; add sqlite backend to depot
 ;; add ipfs backend to depot
 
-;; ==== configuration &&&
-;; remove other program-name cache contents nil
-;; (:backend file-system :max-cache-size-tb 1 &&&)
+
 
 ;; ==== initialization &&&
+(setf *config* (config-merge *config-dev* *config-common*))
+
 
 ;; ==== eviction &&&
 
@@ -279,3 +343,17 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
 ;;   optionally
 ;;     compute time added to depot attribute
 ;;     offset is: longest compute time shifts more recent by half of age ranking span
+
+
+;; ====  &&& share mine notes
+;; beam should be a separate menu
+;; evaluate symbol
+;; beam function
+;; highlight opposite paren forward
+;; jump cursor by forms
+;; live pinned evaluation
+;; file and repl side by side not up down
+;; vim!
+
+
+;; &&& macro eval-once is let over lambda that caches

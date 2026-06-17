@@ -14,6 +14,9 @@
                :filesystem-utils
                :pathname-utils
                :file-attributes
+               :envy
+               :log4cl
+               :try
                )
   :serial t
   :components ((:file "package")
