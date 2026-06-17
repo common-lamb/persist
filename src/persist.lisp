@@ -15,6 +15,7 @@
       (merge-pathnames "persist/"
         #P"/tmp/")))
 
+(defparameter *config* '(:testing t))
 ;; ==== beam notes
 ;; beam should be a separate menu
 ;; evaluate symbol
@@ -60,12 +61,6 @@
 
 ;; ==== function hashes
 
-
-
-
-
-
-
 (defun hash-function (fun)
   "
 takes a function (or macro or symbol)
@@ -102,6 +97,7 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
          (function-object (cond
                             ((functionp fun) fun)
                             ((fboundp fun) (symbol-function fun))
+                            ;; &&& factor out
                             ;; nil if no way to find function
                             ))
 
@@ -121,38 +117,44 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
          )
     (cryptos:md5 (concatenate 'string normalized-string-form description))))
 
-;; ==== form hashes
+;; ==== form hash
 (defun hash-form (fun &rest args)
   (cryptos:md5 (format nil "~S~S~S"
                        (hash-function fun)
                        (hash-args args)
                        (hash-files args))))
 
-;; ==== testing hashes
+;; ==== tests for hashing
 
 (defun add1 (a) (+ a 1))
 
-;; when evaluated
-(hash-function #'add1)
-;; => "479f583d1cf670e8f4ab63bfd3499c37"
-(hash-function 'add1)
-;; => "f09ae336824a4b1bc3ac6da69cfd74aa"
-(hash-form #'add1)
-;; => "b028cc4b0bfae8845b0cd4669fab1fe1"
-(hash-form 'add1)
-;; => "2167fdde66c2adfc5fb273de3136458f"
+;; ;; when evaluated
+;; (hash-function #'add1)
+;; ;; => "479f583d1cf670e8f4ab63bfd3499c37"
+;; (hash-function 'add1)
+;; ;; => "f09ae336824a4b1bc3ac6da69cfd74aa"
+;; (hash-form #'add1)
+;; ;; => "b028cc4b0bfae8845b0cd4669fab1fe1"
+;; (hash-form 'add1)
+;; ;; => "2167fdde66c2adfc5fb273de3136458f"
+;; (persist (add1 1))
+;; lookup:
+;;  #P"/tmp/persist/un-named_ADD1_a519740586db1cc6ef860e2847ed2ed4.bin"
 
-;; when compiled
-(hash-function #'add1)
-;; => "662081b04f977cb00ed29c82b114b2ef"
-(hash-function 'add1)
-;; => "41bfa566537988f2a02159f41ddb2ec6"
-(hash-form #'add1)
-;; => "0b5454bbbe37e83a2016a6d56c1b8f5e"
-(hash-form 'add1)
-;; => "8e64773b396813818378b2f01e45c433"
+;; ;; when compiled
+;; (hash-function #'add1)
+;; ;; => "662081b04f977cb00ed29c82b114b2ef"
+;; (hash-function 'add1)
+;; ;; => "41bfa566537988f2a02159f41ddb2ec6"
+;; (hash-form #'add1)
+;; ;; => "0b5454bbbe37e83a2016a6d56c1b8f5e"
+;; (hash-form 'add1)
+;; ;; => "8e64773b396813818378b2f01e45c433"
+;; (persist (add1 1))
+;; lookup:
+;;  #P"/tmp/persist/un-named_ADD1_9c99f59f47867e44f1433c45d03cfd99.bin"
 
-;; ====
+;; ==== file name generation
 
 (defun function-name (fun)
   (let* (
@@ -160,6 +162,10 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
                             ((functionp fun) fun)
                             ((fboundp fun) (symbol-function fun))
                             ;; nil if no way to find function
+                            ;;
+                            ;; &&&  ensure 'fun passed as symbol (because #' is static?)
+                            ;; &&& factor this to ensure-function-object
+                            ;; &&& enforce functions only
                             ))
          (function-string (write-to-string function-object))
          (drop-curlys (str:replace-all "{.*}" "" function-string :regex t))
@@ -170,25 +176,102 @@ requires (declaim (optimize sb-c:store-source-form)) to be set
                                                  :regex t)
                               :regex t))
          (sanitized (str:remove-punctuation just-name :replacement "")
-           ))
+                    ))
     sanitized))
 
 (defun cache-file-pathname (cache-dir program-name fun &rest args)
   "creates a pathname for the binary memoization"
-  (let ((hash (hash-form fun args)))
+  (let ((hash (hash-form fun args))
+        (function-name (function-name fun)))
     (make-pathname :directory (pathname-directory cache-dir)
                    ;; program-name_fun-name_HA4h.bin
-                   :name (format nil "~A_~A_~A" program-name (function-name fun) hash)
-                   :type "bin"
-                   )))
+                   :name (format nil "~A_~A_~A" program-name function-name hash)
+                   :type "bin")))
 
-I want to eat a pizza
+;; ==== lookup
+(defun lookup (cache-file-name &key (config *config*))
+  "cache-file-name: pathname in cache"
+  (format t "~&lookup:~& ~S" cache-file-name)
+  ;; using config, return nil to force recalculation &&&
+  ;; use depot to search for filepath &&&
+  ;; return hit &&&
+  (format nil "cache-file")
+  nil)
 
+;; ==== reuse
+(defun reuse (hit &key (config *config*))
+  "hit: whatever the pathname becomes when found in depot&&&"
+  (format t "~&reuse:~& ~S" hit)
+  ;; &&& annotate reuse in depot attributes
+  ;; &&& unpack binary to annotated result
+  ;; (let ((result-form (getf annotated-result :result-form))))
+  ;; &&& to handle multiple values
+  ;; (apply #'values result-form)
+  (format nil "result"))
+
+;; ==== calculate
+(defun calculate (fun args &key (config *config*))
+  (format t "~&calculate:~& ~S~& ~S" fun args )
+  (let (t-before t-after t-delta result-form)
+    (setf t-before (local-time:now))
+    ;; do fuction call, as list with multiple values
+    (setf result-form (multiple-value-list (apply fun args)))
+    (setf t-after (local-time:now))
+    ;; delta time before and after run
+    (setf t-delta (local-time:timestamp-difference t-after t-before)) ;; &&& local-time
+    ;; returning a plist of annotations and result
+    (list :time t-delta :result-form result-form)))
+
+;; ==== record
+(defun record (cache-file-name annotated-result &key (config *config*))
+  (format t "~&record:~& ~S~& ~S" cache-file-name annotated-result)
+  (let ((result-form (getf annotated-result :result-form))))
+  ;; &&& pack binary of result-form
+  ;; &&& create cache entry possibly overwriting
+  ;; &&& annotate cache entry with time to compute
+  ;; &&& add to cache
+  (format nil "cached"))
+
+;; ==== yield
+(defun yield (annotated-result)
+  (format t "~&yield:~& ~S" annotated-result)
+  ;; give result back to user
+  (let ((result-form (getf annotated-result :result-form)))
+    ;; handle mulitiple values
+    (apply #'values result-form)))
+
+;; ==== memoization
+
+(defmacro persist (form)
+  "Form memoization"
+  (let ((fun (car form))
+        (args (cdr form)))
+    `(let ((cache-file-name (cache-file-pathname *cache-dir* *program-name* ',fun ,@args)))
+       (if-let ((hit (lookup cache-file-name)))
+         (reuse hit)
+         (let ((annotated-result (calculate ',fun ',args)))
+           (record cache-file-name annotated-result)
+           (yield annotated-result))))))
+
+;; (persist (+ 1 2 3))
+
+;; ==== &&& use depot to control the cache
+;; ==== &&& use cl-binary-store to pack and unpack cache contents
+
+;; add sqlite backend to depot
+;; add ipfs backend to depot
+
+;; ==== configuration &&&
+;; remove other program-name cache contents nil
+;; (:backend file-system :max-cache-size-tb 1 &&&)
+
+;; ==== initialization &&&
 
 ;; ==== eviction &&&
 
-;; independent process of read and memoize
-;;   in own thread, start/restart with initialization
+;; independent process of memoization
+;;   in own thread
+;;     start/restart with initialization
 ;;   watches cache for new file write
 ;;   calculates depot size
 ;;   when over threshold

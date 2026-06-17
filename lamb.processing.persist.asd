@@ -1,5 +1,5 @@
 (defsystem "lamb.processing.persist"
-  :description "on disk persistent memoization for expensive computations"
+  :description "persistent memoization for expensive computations"
   :author "common-lamb (https://github.com/common-lamb)"
   :version "0.0.1"
   :license "MIT"

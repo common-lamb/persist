@@ -1,5 +1,5 @@
 (defpackage :persist
-  (:use :cl :uiop)
+  (:use #:cl #:uiop)
   (:export #:persist
            #:initialize
            #:reconfigure
